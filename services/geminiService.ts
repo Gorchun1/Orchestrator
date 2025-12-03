@@ -7,14 +7,12 @@ class GeminiService {
   private apiKey: string | undefined = undefined;
 
   constructor() {
-    // Ideally initialized with process.env.API_KEY, but we'll handle the case where it's missing for UI demo
-    try {
-        if (process.env.API_KEY) {
-            this.apiKey = process.env.API_KEY;
-            this.client = new GoogleGenAI({ apiKey: this.apiKey });
-        }
-    } catch (e) {
-        console.warn("API Key not found in env, service will be limited.");
+    // Priority: Process Env
+    if (process.env.API_KEY) {
+        this.apiKey = process.env.API_KEY;
+        this.client = new GoogleGenAI({ apiKey: this.apiKey });
+    } else {
+        console.warn("API Key not found in env. Service operates in mock/limited mode.");
     }
   }
 
@@ -22,49 +20,64 @@ class GeminiService {
     return !!this.client;
   }
 
-  public async startChat(history: {role: 'user' | 'model', parts: [{ text: string }]}[] = []): Promise<void> {
-    if (!this.client) return;
+  public async getChatSession(history: {role: 'user' | 'model', parts: [{ text: string }]}[] = []): Promise<Chat | null> {
+    if (!this.client) return null;
 
-    this.chatSession = this.client.chats.create({
-      model: 'gemini-2.5-flash',
-      config: {
-        systemInstruction: SYSTEM_PROMPT_V4_1,
-        temperature: 0.1, // Very low temp for strict logic adherence
-        maxOutputTokens: 1000, 
-      },
-      history: history
-    });
+    // If session doesn't exist, create it.
+    // Note: In a real app, we might want to preserve history across reloads better,
+    // but for now we lazily init.
+    if (!this.chatSession) {
+        this.chatSession = this.client.chats.create({
+            model: 'gemini-2.5-flash',
+            config: {
+                systemInstruction: SYSTEM_PROMPT_V4_1,
+                temperature: 0.2, // Low temp for architectural consistency
+                maxOutputTokens: 2000, 
+            },
+            history: history
+        });
+    }
+    return this.chatSession;
   }
 
   public async sendMessage(message: string): Promise<string> {
-    if (!this.client || !this.chatSession) {
-        // Mock response for demo purposes if no key
-        // Must follow the new strict validation format
-        return `Задача понятна: Анализ запроса пользователя (Демо режим).\n\nСистема работает в демонстрационном режиме без API ключа. Пожалуйста, подключите Gemini API для полноценной работы.\n\n[BACKSTAGE]\nРоль: Оркестратор\nДействие: Эмуляция ответа\nСтатус: waiting_approval\n[/BACKSTAGE]`;
+    const session = await this.getChatSession();
+
+    if (!session) {
+        // Mock Fallback for Demo (Strictly formatted for the new Parser)
+        return `Задача понятна: Демонстрация работы без ключа.
+        
+Я работаю в демонстрационном режиме.
+
+[BACKSTAGE]
+Role: MockSystem
+Status: waiting_approval
+OPCODE: JSON_CMD
+PAYLOAD: {"type": "create_task", "title": "Подключить API Key", "description": "Необходимо добавить process.env.API_KEY для работы нейросети.", "assigneeRole": "Руководитель проекта"}
+[/BACKSTAGE]`;
     }
 
     try {
-      const response: GenerateContentResponse = await this.chatSession.sendMessage({
+      const response: GenerateContentResponse = await session.sendMessage({
         message: message
       });
       return response.text || "Нет ответа от модели.";
     } catch (error) {
       console.error("Gemini API Error:", error);
-      return "Ошибка: Не удалось обработать запрос через Gemini API. Проверьте соединение или квоты.";
+      return "Ошибка: Не удалось обработать запрос через Gemini API. Возможно, истек лимит токенов или ключ невалиден.";
     }
   }
 
   // Helper to structure context for the AI
   public buildContextContext(kpis: string[], currentTeam: any[], openTasks: any[]): string {
-    // Injecting explicit state to prevent hallucinations
     return `
-      [ТЕКУЩИЙ КОНТЕКСТ ПРОЕКТА]
-      1. УТВЕРЖДЕННЫЕ KPI: ${kpis.length > 0 ? kpis.join(', ') : 'Не определены (Требуется Этап 4)'}
-      2. СОСТАВ КОМАНДЫ: ${currentTeam.length > 0 ? currentTeam.map((t: any) => t.role).join(', ') : 'Не сформирована (Требуется Этап 5)'}
-      3. АКТИВНЫЕ ЗАДАЧИ: ${openTasks.length} шт.
+      [СИСТЕМНОЕ СОСТОЯНИЕ]
+      KPI: ${kpis.length > 0 ? kpis.join(', ') : 'Не определены'}
+      КОМАНДА: ${currentTeam.length > 0 ? currentTeam.map((t: any) => `${t.role} (${t.workload}%)`).join(', ') : 'Пусто'}
+      ЗАДАЧИ: ${openTasks.map((t: any) => `${t.id}: ${t.title} [${t.status}]`).join('; ')}
       
       [ИНСТРУКЦИЯ]
-      Используй эти данные. Если поле "Не определено", не выдумывай его значения, а предложи пользователю выполнить соответствующий этап пайплайна.
+      Анализируй это состояние. Если видишь расхождения или необходимость действий, генерируй команды JSON в блоке BACKSTAGE.
     `;
   }
 }
